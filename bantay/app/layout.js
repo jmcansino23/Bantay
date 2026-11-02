@@ -1,8 +1,7 @@
 import { Manrope, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
-const ui = Manrope({ subsets: ["latin"], weight: ["500", "600", "700", "800"], variable: "--font-ui", display: "swap" });
-const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], variable: "--font-mono", display: "swap" });
+
 
 export const metadata = {
   title: "Bantay",
@@ -24,7 +23,13 @@ export const viewport = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${ui.variable} ${mono.variable}`}>
+    <html
+  lang="en"
+  style={{
+    "--font-ui": "Arial, sans-serif",
+    "--font-mono": "monospace",
+  }}
+>
       <body>{children}</body>
     </html>
   );

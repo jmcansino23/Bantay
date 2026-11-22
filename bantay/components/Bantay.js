@@ -3,6 +3,7 @@ import React from "react";
 import { RefreshCw, LogOut } from "lucide-react";
 import { URGENT, buildFeed, buildSubs, buildCards, fmt } from "@/lib/rules";
 import { Tab, Row, RenewalCard, BillsCard, CreditCardBox, Skeleton, Banner, Empty } from "@/components/parts";
+import { RecurringSection, useRecurring } from "@/components/Recurring";
 
 const h = React.createElement;
 
@@ -86,44 +87,96 @@ function useApi(url, intervalMs, enabled) {
 }
 
 // "Mark paid" choices: saved to Upstash Redis when configured, otherwise in this browser.
+// Bills and cards wait for these to load, so a paid month never flashes back after a refresh.
+const readLocal = () => { try { return JSON.parse(localStorage.getItem("bantay-paid") || "{}") || {}; } catch { return {}; } };
+
 function useMarks(enabled) {
-  const [storage, setStorage] = React.useState(null); // "redis" | "browser"
+  const [storage, setStorage] = React.useState(null); // null while loading | "redis" | "browser"
   const [marks, setMarks] = React.useState({});
+  const [loadErr, setLoadErr] = React.useState(false);
   const [busy, setBusy] = React.useState(null);
   const [err, setErr] = React.useState("");
+  const saving = React.useRef(false);
+
+  const load = React.useCallback(async () => {
+    if (saving.current) return;
+    try {
+      const res = await fetch("/api/marks", { cache: "no-store" });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok && d.storage === "redis") { setStorage("redis"); setMarks(d.paid || {}); setLoadErr(false); }
+      else if (res.ok && d.storage === "browser") { setStorage("browser"); setMarks(readLocal()); setLoadErr(false); }
+      else setLoadErr(true); // keep what we had; never fall back to an empty list
+    } catch {
+      setLoadErr(true);
+    }
+  }, []);
+
   React.useEffect(() => {
     if (!enabled) return;
-    fetch("/api/marks", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.storage === "redis") { setStorage("redis"); setMarks(d.paid || {}); }
-        else {
-          setStorage("browser");
-          try { setMarks(JSON.parse(localStorage.getItem("bantay-paid") || "{}")); } catch { setMarks({}); }
-        }
-      })
-      .catch(() => setStorage("browser"));
-  }, [enabled]);
-  const onMark = async (keys, value) => {
-    if (busy) return;
-    setBusy(keys[0]); setErr("");
-    const next = { ...marks };
-    for (const k of keys) { if (value) next[k] = true; else delete next[k]; }
+    load();
+    // Pick up marks made on your other devices when you come back to Bantay, and retry after a failed load
+    const onVis = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120000);
+    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("focus", onVis); clearInterval(t); };
+  }, [enabled, load]);
+
+  React.useEffect(() => {
+    if (!enabled || !loadErr) return;
+    const t = setTimeout(load, 5000);
+    return () => clearTimeout(t);
+  }, [enabled, loadErr, load]);
+
+  const save = async (keys, value) => {
+    if (busy || !storage) return;
+    setBusy(keys[0]); setErr(""); saving.current = true;
     try {
       if (storage === "redis") {
-        const res = await fetch("/api/marks", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paid: next }) });
-        if (!res.ok) throw new Error();
+        const res = await fetch("/api/marks", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(value ? { set: keys } : { unset: keys }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || !d.paid) throw new Error();
+        setMarks(d.paid);
       } else {
+        const next = readLocal(); // start from what's saved now, not from this screen's copy
+        for (const k of keys) { if (value) next[k] = true; else delete next[k]; }
         localStorage.setItem("bantay-paid", JSON.stringify(next));
+        setMarks(next);
       }
-      setMarks(next);
     } catch {
-      setErr("Couldn't save. Try again.");
+      setErr("Couldn't save. Check your connection and try again.");
     } finally {
+      saving.current = false;
       setBusy(null);
     }
   };
-  return { storage, marks, busy, err, onMark };
+  return { storage, marks, busy, err, loadErr, save };
+}
+
+// Adds a second, sturdier key for each mark: the bill's email thread.
+// Then a mark still matches even if a bill's month is read differently on a later refresh.
+function withThreadKeys(keys, subs, cards) {
+  const out = new Set(keys);
+  for (const k of keys) {
+    const card = k.match(/^card:([^:]+):(\d{4}-\d{2})$/);
+    if (card) {
+      const c = (cards || []).find((x) => x.key === card[1]);
+      const y = c && c.cycles.find((x) => x.month === card[2]);
+      if (y && y.threadId) out.add(`t:${c.key}:${y.threadId}`);
+      continue;
+    }
+    const bill = k.match(/^([a-z]+):(\d{4}-\d{2})$/);
+    if (bill) {
+      const s = (subs || []).find((x) => x.def.key === bill[1] && x.kind === "bills");
+      const b = s && s.unpaid.concat(s.paid).find((x) => x.month === bill[2]);
+      if (b && b.mail && b.mail.threadId) out.add(`t:${b.mail.threadId}`);
+    }
+  }
+  return [...out];
 }
 
 export default function Bantay() {
@@ -145,7 +198,9 @@ export default function Bantay() {
   const feedW = useApi("/api/gmail/feed", 60000, on);
   const subW = useApi("/api/gmail/subs", 600000, on);
   const cardW = useApi("/api/gmail/cards", 600000, on);
-  const { storage, marks, busy: markBusy, err: markErr, onMark } = useMarks(on);
+  const recW = useApi("/api/gmail/recurring", 600000, on);
+  const rec = useRecurring(recW.data, on);
+  const { storage, marks, busy: markBusy, err: markErr, loadErr: marksLoadErr, save: saveMarks } = useMarks(on);
   const [busy, setBusy] = React.useState(false);
   const [now, setNow] = React.useState(Date.now());
   React.useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(t); }, []);
@@ -169,31 +224,42 @@ export default function Bantay() {
   const refresh = async () => {
     if (busy) return;
     setBusy(true);
-    await Promise.all([feedW.refresh(), subW.refresh(), cardW.refresh()]);
+    await Promise.all([feedW.refresh(), subW.refresh(), cardW.refresh(), recW.refresh()]);
     setBusy(false); setNow(Date.now());
   };
 
   const banks = (feed || []).filter((m) => m.cat === "bank");
   const ships = (feed || []).filter((m) => m.cat === "ship");
+  const recAlerts = (rec.sums || []).reduce((n, x) => n + x.alerts.length, 0);
   const cardAlerts = (cards || []).reduce((n, c) => n + c.unpaid.filter((y) => y !== c.latest || y.status === "unpaid").length, 0);
-  const subAlerts = (subs || []).reduce((n, s) => n + (s.kind === "bills" ? s.unpaid.filter((b) => b.overdue).length : (["check", "renews"].includes(s.status) ? 1 : 0)), 0) + cardAlerts;
-  const synced = Math.max(feedW.at, subW.at, cardW.at);
+  const subAlerts = (subs || []).filter((s) => s.def.key !== "claude").reduce((n, s) => n + (s.kind === "bills" ? s.unpaid.filter((b) => b.overdue).length : (["check", "renews"].includes(s.status) ? 1 : 0)), 0) + cardAlerts + recAlerts;
+  const synced = Math.max(feedW.at, subW.at, cardW.at, recW.at);
   const canMark = !!storage;
+  const onMark = (keys, value) => saveMarks(withThreadKeys(keys, subs, cards), value);
+  // Hold bills and cards back until your paid marks have loaded (or clearly failed)
+  const marksReady = !!storage || marksLoadErr;
+  const marksNote = !storage && marksLoadErr
+    ? h("p", { className: "text-xs font-semibold px-1", style: { color: "var(--warn)" }, role: "alert" },
+        "Couldn't load your paid marks, so paid months may show for now. Retrying…")
+    : null;
 
   let body;
   if (tab === "sub") {
     body = h(React.Fragment, null,
+      h("div", { className: "mb-5" },
+        h(RecurringSection, { data: recW.data, err: recW.err, sums: rec.sums, onStatus: rec.onStatus, busy: rec.busy, saveErr: rec.err, now, Banner, Skeleton })),
       subW.err ? h(Banner, { err: subW.err }) : null,
-      subs === null ? (subW.err ? null : Skeleton(3))
+      subs === null || !marksReady ? (subW.err ? null : Skeleton(3))
         : h("div", { className: "flex flex-col gap-3" },
+            marksNote,
             markErr ? h("p", { className: "text-xs font-semibold px-1", style: { color: "var(--warn)" }, role: "alert" }, markErr) : null,
             h("h2", { className: "text-[11px] font-bold uppercase tracking-wider px-1", style: { color: "var(--muted)" } }, "Bills & subscriptions"),
-            subs.map((s) => s.kind === "renewal"
+            subs.filter((s) => s.def.key !== "claude").map((s) => s.kind === "renewal"
               ? h(RenewalCard, { key: s.def.key, s, unread: unreadSubs, now })
               : h(BillsCard, { key: s.def.key, s, unread: unreadSubs, now, canMark, onMark, busyKey: markBusy }))),
       h("h2", { className: "text-[11px] font-bold uppercase tracking-wider px-1 mt-4 mb-3", style: { color: "var(--muted)" } }, "Credit cards"),
       cardW.err ? h(Banner, { err: cardW.err }) : null,
-      cards === null ? (cardW.err ? null : Skeleton(2))
+      cards === null || !marksReady ? (cardW.err ? null : Skeleton(2))
         : cards.length
           ? h("div", { className: "flex flex-col gap-3" }, cards.map((c) => h(CreditCardBox, { key: c.key, c, unread: unreadSubs, canMark, onMark, busyKey: markBusy })))
           : h("p", { className: "text-xs px-1", style: { color: "var(--muted)" } }, "No credit card statements or payments found in the last 7 months."),

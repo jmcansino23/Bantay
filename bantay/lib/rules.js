@@ -157,7 +157,7 @@ export function buildSubs(payload, now, details, paidMarks){
     }
     const months = [...byMonth.values()].sort((a,b) => b.month.localeCompare(a.month)).slice(0, BILL_WINDOW[def.key]);
     for (const b of months){
-      const mark = paidMarks[`${def.key}:${b.month}`];
+      const mark = paidMarks[`${def.key}:${b.month}`] || paidMarks[`t:${b.mail.threadId}`];
       // Omantel: a payment receipt after a bill clears that bill and every earlier one (running balance)
       const receipt = def.key === "omantel" && lastPay && lastPay > b.mail.at;
       b.paid = !!(mark || receipt);
@@ -212,7 +212,7 @@ export function finishCard(c, marks, now){
       else if (inWin.length) y.status = c.paidOnAny ? "paid" : "partial";
       else y.status = c.noProof ? "unknown" : "unpaid";
     }
-    if (marks[`card:${c.key}:${y.month}`] && y.status !== "paid"){ y.status = "paid"; y.byYou = true; }
+    if ((marks[`card:${c.key}:${y.month}`] || (y.threadId && marks[`t:${c.key}:${y.threadId}`])) && y.status !== "paid"){ y.status = "paid"; y.byYou = true; }
   });
   const latest = cyc[0];
   const unpaid = cyc.filter(y => ["unpaid","unknown","partial"].includes(y.status) && !(y === latest && y.status === "pending"));

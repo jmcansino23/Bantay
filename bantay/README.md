@@ -5,6 +5,7 @@ Bantay keeps watch over your Gmail and shows only what needs attention:
 - **Banks**: unread transactions, transfers, security and payment-due alerts from the last 3 days
 - **Logistics**: unread order, shipping and delivery updates from the last 3 days
 - **Subscriptions**: Claude Pro renewal, unpaid Omantel and Pag-IBIG months, and whether each credit card's dues are paid (Maya Black, MariCard, Amex, Bank Muscat cards)
+- **Recurring charges** (top of Subscriptions): Claude Pro charge history from receipt emails, price changes, the expected or estimated next renewal, and Keep / Cancel choices
 
 It reads your mail with **read-only** access, keeps no copy of it, and only the Google accounts you list can sign in.
 
@@ -94,3 +95,5 @@ npm run dev                  # open http://localhost:3000
 - `app/api/gmail/*`: searches Gmail with read-only access and returns only the emails the dashboard needs.
 - `lib/rules.js`: which senders count, what's important, and how bills and card payments are matched. Edit this to add a bank, a card or a subscription.
 - `app/api/marks`: saves your "Mark paid" choices to Upstash Redis.
+- `lib/recurring.js`: which subscriptions to watch and how their receipts are read. Add a service to `SERVICES` to track it too.
+- `app/api/gmail/recurring` and `app/api/recurring`: scan the last 90 days of receipts, save charge history, and save your Keep / Cancel choices.
